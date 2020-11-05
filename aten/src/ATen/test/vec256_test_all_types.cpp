@@ -22,6 +22,8 @@ namespace {
     template <typename T>
     class SqrtAndReciprocalReal : public ::testing::Test {};
     template <typename T>
+    class FractionAndRemainderReal : public ::testing::Test {};
+    template <typename T>
     class Trigonometric : public ::testing::Test {};
     template <typename T>
     class ErrorFunctions : public ::testing::Test {};
@@ -57,7 +59,6 @@ namespace {
     using QuantTestedTypes = ::testing::Types<vqint8, vquint8, vqint>;
     using RealFloatIntTestedTypes = ::testing::Types<vfloat, vdouble, vlong, vint, vshort>;
     using FloatIntTestedTypes = ::testing::Types<vfloat, vdouble, vcomplex, vcomplexDbl, vlong, vint, vshort>;
-    using SingleFloat = ::testing::Types<vfloat>;
     using ComplexTypes = ::testing::Types<vcomplex, vcomplexDbl>;
     TYPED_TEST_CASE(Memory, ALLTestedTypes);
     TYPED_TEST_CASE(Arithmetics, FloatIntTestedTypes);
@@ -69,6 +70,7 @@ namespace {
     TYPED_TEST_CASE(Rounding, RealFloatTestedTypes);
     TYPED_TEST_CASE(SqrtAndReciprocal, FloatTestedTypes);
     TYPED_TEST_CASE(SqrtAndReciprocalReal, RealFloatTestedTypes);
+    TYPED_TEST_CASE(FractionAndRemainderReal, RealFloatTestedTypes);
     TYPED_TEST_CASE(Trigonometric, RealFloatTestedTypes);
     TYPED_TEST_CASE(ErrorFunctions, RealFloatTestedTypes);
     TYPED_TEST_CASE(Exponents, RealFloatTestedTypes);
@@ -198,7 +200,6 @@ namespace {
             [](vec v) { return v.sqrt(); },
             createDefaultUnaryTestCase<vec>(TestSeed(), false, true));
     }
-
     TYPED_TEST(SqrtAndReciprocalReal, RSqrt) {
         using vec = TypeParam;
         test_unary<vec>(
@@ -216,6 +217,23 @@ namespace {
             [](vec v) { return v.reciprocal(); },
             createDefaultUnaryTestCase<vec>(TestSeed()),
             RESOLVE_OVERLOAD(filter_zero));
+    }
+    TYPED_TEST(FractionAndRemainderReal, Frac) {
+      using vec = TypeParam;
+      test_unary<vec>(
+          NAME_INFO(frac),
+          RESOLVE_OVERLOAD(frac),
+          [](vec v) { return v.frac(); },
+          createDefaultUnaryTestCase<vec>(TestSeed(), false, true));
+    }
+    TYPED_TEST(FractionAndRemainderReal, Fmod) {
+      using vec = TypeParam;
+      test_binary<vec>(
+          NAME_INFO(fmod),
+          RESOLVE_OVERLOAD(std::fmod),
+          [](vec v0, vec v1) { return v0.fmod(v1); },
+          createDefaultBinaryTestCase<vec>(TestSeed()),
+          RESOLVE_OVERLOAD(filter_fmod));
     }
     TYPED_TEST(Trigonometric, Sin) {
         using vec = TypeParam;
@@ -702,29 +720,23 @@ namespace {
             ASSERT_EQ(expected, actual) << "Failure Details:\n"
                 << std::hex << "Expected:\n#\t" << expected
                 << "\nActual:\n#\t" << actual;
-        } //
+        }
     }
     template<typename vec, typename VT, int64_t mask>
     typename std::enable_if_t<(mask < 0 || mask> 255), void>
-        test_blend(VT expected_val[vec::size()], VT a[vec::size()], VT b[vec::size()])
+    test_blend(VT expected_val[vec::size()], VT a[vec::size()], VT b[vec::size()])
     {
     }
     template<typename vec, typename VT, int64_t mask>
     typename std::enable_if_t<(mask >= 0 && mask <= 255), void>
-        test_blend(VT expected_val[vec::size()], VT a[vec::size()], VT b[vec::size()])
-    {
-        //generate expected_val
+    test_blend(VT expected_val[vec::size()], VT a[vec::size()], VT b[vec::size()]) {
+        // generate expected_val
         int64_t m = mask;
         for (int64_t i = 0; i < vec::size(); i++) {
-            if (m & 0x01) {
-                expected_val[i] = b[i];
-            }
-            else {
-                expected_val[i] = a[i];
-            }
+            expected_val[i] = (m & 0x01) ? b[i] : a[i];
             m = m >> 1;
         }
-        //test with blend
+        // test with blend
         auto vec_a = vec::loadu(a);
         auto vec_b = vec::loadu(b);
         auto expected = vec::loadu(expected_val);
@@ -732,6 +744,47 @@ namespace {
         auto mask_str = std::string("\nblend mask: ") + std::to_string(mask);
         if (AssertVec256<vec>(std::string(NAME_INFO(test_blend)) + mask_str, expected, actual).check()) return;
         test_blend<vec, VT, mask - 1>(expected_val, a, b);
+    }
+    template<typename vec, typename VT, int64_t idx, int64_t N>
+    std::enable_if_t<(!is_complex<VT>::value && idx == N), bool>
+    test_blendv(VT expected_val[vec::size()], VT a[vec::size()], VT b[vec::size()], VT mask[vec::size()]) {
+        // generate expected_val
+        for (int64_t i = 0; i < vec::size(); i++) {
+            int64_t hex_mask = 0;
+            std::memcpy(&hex_mask, &mask[i], sizeof(VT));
+            expected_val[i] = (hex_mask & 0x01) ? b[i] : a[i];
+        }
+        // test with blendv
+        auto vec_a = vec::loadu(a);
+        auto vec_b = vec::loadu(b);
+        auto vec_m = vec::loadu(mask);
+        auto expected = vec::loadu(expected_val);
+        auto actual = vec::blendv(vec_a, vec_b, vec_m);
+        auto mask_str = std::string("\nblendv mask: ");
+        for (int64_t i = 0; i < vec::size(); i++) {
+            mask_str += std::to_string(mask[i]) + " ";
+        }
+        if (AssertVec256<vec>(std::string(NAME_INFO(test_blendv)) + mask_str, expected, actual).check()) {
+            return false;
+        }
+        return true;
+    }
+    template<typename vec, typename VT, int64_t idx, int64_t N>
+    std::enable_if_t<(!is_complex<VT>::value && idx != N), bool>
+    test_blendv(VT expected_val[vec::size()], VT a[vec::size()], VT b[vec::size()], VT mask[vec::size()]) {
+        // shuffle mask and do blendv test
+        VT m = mask[idx];
+        if (!test_blendv<vec, VT, idx+1, N>(expected_val, a, b, mask)) return false;
+        if (m != (VT)0) {
+          mask[idx] = (VT)0;
+        }
+        else {
+          int64_t hex_mask = 0xFFFFFFFFFFFFFFFF;
+          std::memcpy(&mask[idx], &hex_mask, sizeof(VT));
+        }
+        if (!test_blendv<vec, VT, idx+1, N>(expected_val, a, b, mask)) return false;
+        mask[idx] = m;
+        return true;
     }
     template<typename T, int N>
     void blend_init(T(&a)[N], T(&b)[N]) {
@@ -760,6 +813,16 @@ namespace {
         a[1] = a[0] + add;
         b[1] = b[0] + add;
     }
+    TYPED_TEST(BitwiseFloatsAdditional, Blendv) {
+        using vec = TypeParam;
+        using VT = ValueType<TypeParam>;
+        CACHE_ALIGN VT a[vec::size()];
+        CACHE_ALIGN VT b[vec::size()];
+        CACHE_ALIGN VT mask[vec::size()] = {0};
+        CACHE_ALIGN VT expected_val[vec::size()];
+        blend_init(a, b);
+        test_blendv<vec, VT, 0, vec::size()>(expected_val, a, b, mask);
+    }
     TYPED_TEST(BitwiseFloatsAdditional2, Blend) {
         using vec = TypeParam;
         using VT = ValueType<TypeParam>;
@@ -769,6 +832,29 @@ namespace {
         blend_init(a, b);
         constexpr int64_t power_sets = 1LL << (vec::size());
         test_blend<vec, VT, power_sets - 1>(expected_val, a, b);
+    }
+    template<typename vec, typename VT>
+    void test_set(VT expected_val[vec::size()], VT a[vec::size()], VT b[vec::size()], int64_t count){
+        if (count < 0) return;
+        //generate expected_val
+        for (int64_t i = 0; i < vec::size(); i++) {
+            expected_val[i] = (i < count) ? b[i] : a[i];
+        }
+        // test with set
+        auto vec_a = vec::loadu(a);
+        auto vec_b = vec::loadu(b);
+        auto expected = vec::loadu(expected_val);
+        auto actual = vec::set(vec_a, vec_b, count);
+        test_set<vec, VT>(expected_val, a, b, (count == 0 ? -1 : count / 2));
+    }
+    TYPED_TEST(BitwiseFloatsAdditional2, Set) {
+        using vec = TypeParam;
+        using VT = ValueType<TypeParam>;
+        CACHE_ALIGN VT a[vec::size()];
+        CACHE_ALIGN VT b[vec::size()];
+        CACHE_ALIGN VT expected_val[vec::size()];
+        blend_init(a, b);
+        test_set<vec, VT>(expected_val, a, b, vec::size());
     }
     TEST(ComplexTests, TestComplexFloatImagRealConj) {
         float aa[] = { 1.5488e-28,2.5488e-28,3.5488e-28,4.5488e-28,5.5488e-28,6.5488e-28,7.5488e-28,8.5488e-28 };
@@ -984,6 +1070,190 @@ namespace {
                     },
                     test_case);
     }
+
+
+    // ********************************* vec256_test.cpp ***************************************************
+    //
+    // TODO:
+    // We are working on merging all the vec256 test files into above framework. The following tests originally
+    // come from vec256_test.cpp, these tests are not consistent with the generic framework and can not be migrated
+    // at the moment. We temporarily put these tests here and will migrate them into the generic framework in the
+    // next phase.
+    bool check_equal(const at::Tensor& a, const at::Tensor& b) {
+      return (a.equal(b));
+    }
+
+    bool check_almost_equal(const at::Tensor& a, const at::Tensor& b, const float tolerance) {
+      double max_val = a.abs().max().item<float>();
+      max_val = std::max(max_val, b.abs().max().item<float>());
+      if ((a - b).abs().max().item<float>() > tolerance * max_val) {
+        std::cout << "Max difference:" << (a - b).abs().max().item<float>() << std::endl;
+        return false;
+      }
+      return true;
+    }
+
+    TEST(Vec256TestFloat, arangeTest) {
+      using namespace at::vec256;
+      at::Tensor arange_output_ref = at::zeros({8});
+      at::Tensor arange_output_vectorized = at::zeros({8});
+      float base = 7.f;
+      float step = 5.f;
+      float* ref_output_ptr = arange_output_ref.data_ptr<float>();
+      for (int64_t i = 0; i < 8; ++i) {
+        ref_output_ptr[i] = base + i * step;
+      }
+      float* vec_output_ptr = arange_output_vectorized.data_ptr<float>();
+      auto arange_output = Vec256<float>::arange(base, step);
+      arange_output.store(vec_output_ptr);
+      ASSERT_TRUE(check_equal(arange_output_ref, arange_output_vectorized));
+    }
+
+    // TODO:
+    // CopyTest and Set are basically tests loadu and store, probably can be either merged into one, or just
+    // delete them since the generic framework test loadu and store implicitly everywhere.
+
+    template<typename T>
+    void BlendTestHelperScalar(
+        const T* a_ptr,
+        const T* b_ptr,
+        T* res_ptr,
+        const int64_t num_els,
+        const int64_t count) {
+      using namespace at::vec256;
+      for(auto i = 0; i < num_els; ++i) {
+        for (auto j = 0; j < Vec256<float>::size(); ++j) {
+          auto index = i * Vec256<float>::size() + j;
+          if (j < count) {
+            res_ptr[index] = b_ptr[index];
+          } else {
+            res_ptr[index] = a_ptr[index];
+          }
+        }
+      }
+    }
+
+    template<typename T>
+    void BlendTestHelperVector(
+        const T* a_ptr,
+        const T* b_ptr,
+        T* res_ptr,
+        const int64_t num_els,
+        const int64_t count) {
+      using namespace at::vec256;
+      for(auto i = 0; i < num_els; ++i) {
+        auto a_elements = Vec256<float>::loadu(a_ptr);
+        auto b_elements = Vec256<float>::loadu(b_ptr);
+        a_ptr += Vec256<float>::size();
+        b_ptr += Vec256<float>::size();
+        auto res_elements = Vec256<float>::set(a_elements, b_elements, count);
+        res_elements.store(res_ptr);
+        res_ptr += Vec256<float>::size();
+      }
+    }
+
+    // Checks Set
+    TEST(Vec256TestFloat, Set) {
+      using namespace at::vec256;
+      at::Tensor a = at::rand({23, 23});
+      at::Tensor b = at::rand({23, 23});
+      at::Tensor ref_res = at::zeros({23, 23});
+      at::Tensor vec_res = at::zeros({23, 23});
+
+      const float* a_ptr = a.data_ptr<float>();
+      const float* b_ptr = b.data_ptr<float>();
+      float* ref_res_ptr = ref_res.data_ptr<float>();
+      float* vec_res_ptr = vec_res.data_ptr<float>();
+
+      // Only check over multiple of Vec::size elements
+      const size_t num_els = (a.numel() / Vec256<float>::size());
+      BlendTestHelperScalar(a_ptr, b_ptr, ref_res_ptr, num_els, 0);
+      BlendTestHelperVector(a_ptr, b_ptr, vec_res_ptr, num_els, 0);
+      ASSERT_TRUE(check_equal(ref_res, vec_res));
+      BlendTestHelperScalar(a_ptr, b_ptr, ref_res_ptr, num_els, 1);
+      BlendTestHelperVector(a_ptr, b_ptr, vec_res_ptr, num_els, 1);
+      ASSERT_TRUE(check_equal(ref_res, vec_res));
+      BlendTestHelperScalar(a_ptr, b_ptr, ref_res_ptr, num_els, 4);
+      BlendTestHelperVector(a_ptr, b_ptr, vec_res_ptr, num_els, 4);
+      ASSERT_TRUE(check_equal(ref_res, vec_res));
+      BlendTestHelperScalar(a_ptr, b_ptr, ref_res_ptr, num_els, 6);
+      BlendTestHelperVector(a_ptr, b_ptr, vec_res_ptr, num_els, 6);
+      ASSERT_TRUE(check_equal(ref_res, vec_res));
+      BlendTestHelperScalar(a_ptr, b_ptr, ref_res_ptr, num_els, 8);
+      BlendTestHelperVector(a_ptr, b_ptr, vec_res_ptr, num_els, 8);
+      ASSERT_TRUE(check_equal(ref_res, vec_res));
+    }
+
+    TEST(Vec256TestFloat, check_convert) {
+      using namespace at::vec256;
+      at::Tensor a = at::rand({23, 23});
+      a = a * -10;
+      a = a + 10;
+      at::Tensor ref_res =
+        at::empty({23, 23}, at::device(at::kCPU).dtype(at::kInt));
+      at::Tensor vec_res =
+        at::empty({23, 23}, at::device(at::kCPU).dtype(at::kInt));
+      float* a_float_ptr = a.data_ptr<float>();
+      int32_t* ref_res_int_ptr = ref_res.data_ptr<int32_t>();
+      int32_t* vec_res_int_ptr = vec_res.data_ptr<int32_t>();
+      for(auto i = 0; i < a.numel(); ++i) {
+        ref_res_int_ptr[i] = static_cast<int32_t>(a_float_ptr[i]);
+      }
+      at::vec256::convert(a_float_ptr, vec_res_int_ptr, a.numel());
+      ASSERT_TRUE(check_almost_equal(ref_res, vec_res, 1e-6));
+
+      a = at::randint(-100, 100, {23, 23});
+      a = a.to(at::kInt);
+      ref_res = at::empty({23, 23});
+      vec_res = at::empty({23, 23});
+      int32_t* a_int_ptr = a.data_ptr<int32_t>();
+      float* ref_res_float_ptr = ref_res.data_ptr<float>();
+      float* vec_res_float_ptr = vec_res.data_ptr<float>();
+      for(auto i = 0; i < a.numel(); ++i) {
+        ref_res_float_ptr[i] = static_cast<float>(a_int_ptr[i]);
+      }
+      at::vec256::convert(a_int_ptr, vec_res_float_ptr, a.numel());
+      ASSERT_TRUE(check_almost_equal(ref_res, vec_res, 1e-6));
+    }
+
+    TEST(Vec256TestFloat, check_fmadd) {
+      using namespace at::vec256;
+      at::Tensor a = at::rand({23, 23});
+      a = a * -10;
+      a = a + 10;
+      at::Tensor b = at::rand({23, 23});
+      b = b * -5;
+      b = b + 5;
+      at::Tensor c = at::rand({23, 23});
+      c = c * 20;
+      at::Tensor ref_res = at::zeros({23, 23});
+      at::Tensor vec_res = at::zeros({23, 23});
+      float* a_ptr = a.data_ptr<float>();
+      float* b_ptr = a.data_ptr<float>();
+      float* c_ptr = a.data_ptr<float>();
+      float* ref_res_ptr = ref_res.data_ptr<float>();
+      float* vec_res_ptr = vec_res.data_ptr<float>();
+      size_t num_els =
+        (a.numel() / Vec256<float>::size()) * Vec256<float>::size();
+      for(auto i = 0; i < num_els; ++i) {
+        ref_res_ptr[i] = a_ptr[i] * b_ptr[i] + c_ptr[i];
+      }
+      for (size_t i = 0; i < num_els; i += Vec256<float>::size()) {
+        auto a_elements = Vec256<float>::loadu(a_ptr);
+        auto b_elements = Vec256<float>::loadu(b_ptr);
+        auto c_elements = Vec256<float>::loadu(c_ptr);
+        a_ptr += Vec256<float>::size();
+        b_ptr += Vec256<float>::size();
+        c_ptr += Vec256<float>::size();
+        auto res_elements = at::vec256::fmadd(a_elements, b_elements, c_elements);
+        res_elements.store(vec_res_ptr);
+        vec_res_ptr += Vec256<float>::size();
+      }
+      ASSERT_TRUE(check_almost_equal(ref_res, vec_res, 1e-6));
+    }
+
+    // ********************************* vec256_test.cpp end*****************************************************
+
 #else
 #error GTEST does not have TYPED_TEST
 #endif
